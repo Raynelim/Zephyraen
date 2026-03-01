@@ -11,20 +11,27 @@
       <section class="auth-card">
         <h1>ZEPHYRAEN</h1>
         <p class="subtitle">Login</p>
+        <p id="authStatusMessage" class="auth-status" aria-live="polite"></p>
 
-        <form id="loginForm" class="auth-form">
-          <label for="loginEmail">Email</label>
-          <input id="loginEmail" name="email" type="email" required />
+        <form id="loginForm" class="auth-form" novalidate>
+          <div class="auth-field">
+            <label for="loginEmail">Email</label>
+            <input id="loginEmail" name="email" type="text" />
+            <p id="loginEmailMessage" class="field-message" aria-live="polite"></p>
+          </div>
 
-          <label for="loginPassword">Password</label>
-          <input id="loginPassword" name="password" type="password" required />
+          <div class="auth-field">
+            <label for="loginPassword">Password</label>
+            <input id="loginPassword" name="password" type="password" />
+            <p id="loginPasswordMessage" class="field-message" aria-live="polite"></p>
+          </div>
 
-          <button type="submit" class="option-btn">Login</button>
+          <button type="submit" class="option-btn" formnovalidate>Login</button>
           <button type="button" id="goSignupBtn" class="option-btn">Go to Signup</button>
         </form>
       </section>
     </main>
 
-    <script type="module" src="auth.js"></script>
+    <script type="module" src="auth.js?v=20260302"></script>
   </body>
 </html>

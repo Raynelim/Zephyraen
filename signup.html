@@ -11,23 +11,39 @@
       <section class="auth-card">
         <h1>ZEPHYRAEN</h1>
         <p class="subtitle">Create Account</p>
+        <p id="authStatusMessage" class="auth-status" aria-live="polite"></p>
 
-        <form id="signupForm" class="auth-form">
-          <label for="signupEmail">Email</label>
-          <input id="signupEmail" name="email" type="email" required />
+        <form id="signupForm" class="auth-form" novalidate>
+          <div class="auth-field">
+            <label for="signupName">Name</label>
+            <input id="signupName" name="name" type="text" />
+            <p id="signupNameMessage" class="field-message" aria-live="polite"></p>
+          </div>
 
-          <label for="signupPassword">Password</label>
-          <input id="signupPassword" name="password" type="password" required />
+          <div class="auth-field">
+            <label for="signupEmail">Email</label>
+            <input id="signupEmail" name="email" type="text" />
+            <p id="signupEmailMessage" class="field-message" aria-live="polite"></p>
+          </div>
 
-          <label for="signupConfirmPassword">Confirm Password</label>
-          <input id="signupConfirmPassword" name="confirmPassword" type="password" required />
+          <div class="auth-field">
+            <label for="signupPassword">Password</label>
+            <input id="signupPassword" name="password" type="password" />
+            <p id="signupPasswordMessage" class="field-message" aria-live="polite"></p>
+          </div>
 
-          <button type="submit" class="option-btn">Signup</button>
+          <div class="auth-field">
+            <label for="signupConfirmPassword">Confirm Password</label>
+            <input id="signupConfirmPassword" name="confirmPassword" type="password" />
+            <p id="signupConfirmPasswordMessage" class="field-message" aria-live="polite"></p>
+          </div>
+
+          <button type="submit" class="option-btn" formnovalidate>Signup</button>
           <button type="button" id="goLoginBtn" class="option-btn">Go to Login</button>
         </form>
       </section>
     </main>
 
-    <script type="module" src="auth.js"></script>
+    <script type="module" src="auth.js?v=20260302"></script>
   </body>
 </html>

@@ -222,9 +222,35 @@ h1 {
   padding: 18px;
   display: grid;
   gap: 12px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.auth-card.success-flash {
+  border-color: #5de38a;
+  box-shadow: 0 0 0 2px rgba(93, 227, 138, 0.25);
+}
+
+.auth-status {
+  display: none;
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.35;
+}
+
+.auth-status.show {
+  display: block;
+}
+
+.auth-status.success {
+  color: #5de38a;
 }
 
 .auth-form {
+  display: grid;
+  gap: 18px;
+}
+
+.auth-field {
   display: grid;
   gap: 8px;
 }
@@ -235,9 +261,39 @@ h1 {
 }
 
 .auth-form input {
-  border: 1px solid var(--line);
+  border: 2px solid #8fa1ad;
+  border-radius: 8px;
   background: #050505;
   color: var(--text);
-  padding: 9px 10px;
+  padding: 11px 12px;
   font-family: inherit;
+  transition: border-color 0.15s ease;
+}
+
+.auth-form input.error {
+  border-color: #ff6b6b;
+}
+
+.auth-form input.success {
+  border-color: #5de38a;
+}
+
+.field-message {
+  display: none;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  margin: 0;
+  white-space: pre-line;
+}
+
+.field-message.show {
+  display: block;
+}
+
+.field-message.error {
+  color: #ff6b6b;
+}
+
+.field-message.success {
+  color: #5de38a;
 }
