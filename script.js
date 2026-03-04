@@ -59,14 +59,20 @@ function getDefaultCoreStats() {
   };
 }
 
-function getDefaultStatsPayload() {
+function getDefaultGameDetailsPayload() {
   return {
     day: 1,
-    playerLevel: 1,
-    xp: 0,
-    villageLevel: 1,
-    statPoints: 0,
-    ...getDefaultCoreStats(),
+    stats: {
+      Level: 1,
+      EXP: 0,
+      "stat points available": 0,
+      str: baseStatValue,
+      agi: baseStatValue,
+      vit: baseStatValue,
+      int: baseStatValue,
+      end: baseStatValue,
+      per: baseStatValue,
+    },
   };
 }
 
@@ -114,37 +120,49 @@ function processLevelUps(initialLevel, initialXp) {
   };
 }
 
-function isPayloadEquivalent(rawStats, payload) {
-  if (!rawStats || typeof rawStats !== "object") {
+function isPayloadEquivalent(rawValue, payload) {
+  if (!rawValue || typeof rawValue !== "object") {
     return false;
   }
 
-  return Object.entries(payload).every(([key, value]) => Number(rawStats[key]) === value);
+  return JSON.stringify(rawValue) === JSON.stringify(payload);
 }
 
-function normalizeStatsPayload(rawStats) {
-  const defaults = getDefaultStatsPayload();
-  const incoming = rawStats && typeof rawStats === "object" ? rawStats : {};
+function normalizeGameDetailsPayload(rawGameDetails) {
+  const defaults = getDefaultGameDetailsPayload();
+  const incoming = rawGameDetails && typeof rawGameDetails === "object" ? rawGameDetails : {};
+  const incomingStats = incoming.stats && typeof incoming.stats === "object" ? incoming.stats : incoming;
 
-  const rawLevel = Number(incoming.playerLevel ?? incoming.level ?? defaults.playerLevel);
-  const rawXp = Number(incoming.xp ?? defaults.xp);
+  const rawLevel = Number(incomingStats.Level ?? incomingStats.playerLevel ?? incoming.level ?? defaults.stats.Level);
+  const rawXp = Number(incomingStats.EXP ?? incomingStats.xp ?? defaults.stats.EXP);
   const resolvedProgression = processLevelUps(rawLevel, rawXp);
 
-  const normalized = {
-    ...defaults,
-    day: Math.max(1, Math.round(Number(incoming.day ?? defaults.day) || defaults.day)),
-    playerLevel: resolvedProgression.level,
-    xp: resolvedProgression.xp,
-    villageLevel: Math.max(1, Math.round(Number(incoming.villageLevel ?? defaults.villageLevel) || defaults.villageLevel)),
+  const normalizedStats = {
+    Level: resolvedProgression.level,
+    EXP: resolvedProgression.xp,
+    str: parseStatValue(incomingStats.str ?? incomingStats.strength, defaults.stats.str),
+    agi: parseStatValue(incomingStats.agi ?? incomingStats.agility, defaults.stats.agi),
+    vit: parseStatValue(incomingStats.vit ?? incomingStats.vitality, defaults.stats.vit),
+    int: parseStatValue(incomingStats.int ?? incomingStats.intelligence, defaults.stats.int),
+    end: parseStatValue(incomingStats.end ?? incomingStats.endurance, defaults.stats.end),
+    per: parseStatValue(incomingStats.per ?? incomingStats.perception, defaults.stats.per),
   };
 
-  coreStats.forEach((stat) => {
-    normalized[stat.key] = parseStatValue(incoming[stat.key], defaults[stat.key]);
-  });
+  const spentPoints =
+    (normalizedStats.str - baseStatValue) +
+    (normalizedStats.agi - baseStatValue) +
+    (normalizedStats.vit - baseStatValue) +
+    (normalizedStats.int - baseStatValue) +
+    (normalizedStats.end - baseStatValue) +
+    (normalizedStats.per - baseStatValue);
 
-  const spentPoints = coreStats.reduce((total, stat) => total + (normalized[stat.key] - baseStatValue), 0);
-  const allocatablePoints = Math.max(0, (normalized.playerLevel - 1) * statPointsPerLevel);
-  normalized.statPoints = Math.max(0, allocatablePoints - spentPoints);
+  const allocatablePoints = Math.max(0, (normalizedStats.Level - 1) * statPointsPerLevel);
+  normalizedStats["stat points available"] = Math.max(0, allocatablePoints - spentPoints);
+
+  const normalized = {
+    day: Math.max(1, Math.round(Number(incoming.day ?? defaults.day) || defaults.day)),
+    stats: normalizedStats,
+  };
 
   return {
     payload: normalized,
@@ -166,7 +184,7 @@ const state = {
   uid: null,
   name: "Player",
   email: "",
-  statsPath: "",
+  gameDetailsPath: "",
   clockAnchorDay: 1,
   clockAnchorRealMs: Date.now(),
   lastClockDay: 1,
@@ -189,14 +207,20 @@ let frameTicker = null;
 let statsUnsubscribe = null;
 let clockTicker = null;
 
-function getStatsPayloadFromState() {
+function getGameDetailsPayloadFromState() {
   return {
     day: state.day,
-    playerLevel: state.level,
-    xp: state.xp,
-    villageLevel: state.villageLevel,
-    statPoints: state.statPoints,
-    ...state.coreStats,
+    stats: {
+      Level: state.level,
+      EXP: state.xp,
+      "stat points available": state.statPoints,
+      str: state.coreStats.strength,
+      agi: state.coreStats.agility,
+      vit: state.coreStats.vitality,
+      int: state.coreStats.intelligence,
+      end: state.coreStats.endurance,
+      per: state.coreStats.perception,
+    },
   };
 }
 
@@ -264,7 +288,7 @@ async function syncDayIfChanged(snapshot) {
 
   state.lastClockDay = snapshot.day;
 
-  if (!state.statsPath) {
+  if (!state.gameDetailsPath) {
     return;
   }
 
@@ -311,12 +335,12 @@ function addLog(message) {
 }
 
 async function persistStats() {
-  if (!state.statsPath) {
+  if (!state.gameDetailsPath) {
     return;
   }
 
-  const statsRef = ref(database, state.statsPath);
-  await set(statsRef, getStatsPayloadFromState());
+  const gameDetailsRef = ref(database, state.gameDetailsPath);
+  await set(gameDetailsRef, getGameDetailsPayloadFromState());
 }
 
 function renderStats() {
@@ -495,55 +519,47 @@ function subscribeToUserStats(uid) {
     statsUnsubscribe = null;
   }
 
-  const accountDetailsRef = ref(database, `players/${uid}/accountDetails`);
+  const accountDetailsRef = ref(database, `players/${uid}/account details`);
+  const legacyAccountDetailsRef = ref(database, `players/${uid}/accountDetails`);
 
-  get(accountDetailsRef).then((accountSnapshot) => {
-    const accountDetails = accountSnapshot.exists() ? accountSnapshot.val() ?? {} : {};
+  get(accountDetailsRef).then(async (accountSnapshot) => {
+    const resolvedSnapshot = accountSnapshot.exists() ? accountSnapshot : await get(legacyAccountDetailsRef);
+    const accountDetails = resolvedSnapshot.exists() ? resolvedSnapshot.val() ?? {} : {};
     const accountEmail = typeof accountDetails?.email === "string" ? accountDetails.email.trim() : "";
-    const accountName = typeof accountDetails?.name === "string" ? accountDetails.name.trim() : "";
+    const accountName = typeof accountDetails?.username === "string" ? accountDetails.username.trim() : "";
     if (accountEmail) {
       state.email = accountEmail;
     }
     state.name = accountName || deriveNameFromEmail(state.email);
 
-    const difficultyLevel = accountDetails?.difficultyLevel ?? {};
-    const hasEasyStats = Boolean(difficultyLevel?.easy?.gameDetails?.stats);
-    const hasNormalStats = Boolean(difficultyLevel?.normal?.gameDetails?.stats);
-    const hasHardcoreStats = Boolean(difficultyLevel?.hardcore?.gameDetails?.stats);
+    const difficultyLevel = accountDetails?.DifficultyLevel ?? accountDetails?.difficultyLevel ?? {};
+    const preferredOrder = ["easy", "normal", "hardcore"];
+    const firstValid = preferredOrder.find((level) => Boolean(difficultyLevel?.[level]?.gameDetails));
+    const normalizedDifficulty = firstValid || "normal";
 
-    let normalizedDifficulty = "normal";
-    if (hasEasyStats) {
-      normalizedDifficulty = "easy";
-    } else if (hasNormalStats) {
-      normalizedDifficulty = "normal";
-    } else if (hasHardcoreStats) {
-      normalizedDifficulty = "hardcore";
-    }
+    const gameDetailsRef = ref(database, `players/${uid}/account details/DifficultyLevel/${normalizedDifficulty}/gameDetails`);
+    state.gameDetailsPath = `players/${uid}/account details/DifficultyLevel/${normalizedDifficulty}/gameDetails`;
 
-    const statsRef = ref(database, `players/${uid}/accountDetails/difficultyLevel/${normalizedDifficulty}/gameDetails/stats`);
-    state.statsPath = `players/${uid}/accountDetails/difficultyLevel/${normalizedDifficulty}/gameDetails/stats`;
-
-    statsUnsubscribe = onValue(statsRef, async (snapshot) => {
+    statsUnsubscribe = onValue(gameDetailsRef, async (snapshot) => {
       if (!snapshot.exists()) {
-        await set(statsRef, getDefaultStatsPayload());
+        await set(gameDetailsRef, getDefaultGameDetailsPayload());
         return;
       }
 
-      const rawStats = snapshot.val();
-      const { payload, shouldSave, leveledUpFromOverflowXp } = normalizeStatsPayload(rawStats);
+      const rawGameDetails = snapshot.val();
+      const { payload, shouldSave, leveledUpFromOverflowXp } = normalizeGameDetailsPayload(rawGameDetails);
 
       state.day = payload.day;
-      state.level = payload.playerLevel;
-      state.xp = payload.xp;
-      state.villageLevel = payload.villageLevel;
-      state.statPoints = payload.statPoints;
+      state.level = payload.stats.Level;
+      state.xp = payload.stats.EXP;
+      state.statPoints = payload.stats["stat points available"];
       state.coreStats = {
-        strength: payload.strength,
-        agility: payload.agility,
-        vitality: payload.vitality,
-        intelligence: payload.intelligence,
-        endurance: payload.endurance,
-        perception: payload.perception,
+        strength: payload.stats.str,
+        agility: payload.stats.agi,
+        vitality: payload.stats.vit,
+        intelligence: payload.stats.int,
+        endurance: payload.stats.end,
+        perception: payload.stats.per,
       };
       recalculateDerivedState();
       setClockAnchor(state.day);
@@ -554,7 +570,7 @@ function subscribeToUserStats(uid) {
 
       if (shouldSave) {
         try {
-          await set(statsRef, payload);
+          await set(gameDetailsRef, payload);
         } catch (error) {
           console.error("Failed to normalize player stats:", error);
           addLog("Sync warning: normalized stats could not be saved.");

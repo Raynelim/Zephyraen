@@ -20,6 +20,32 @@ const difficultyDescriptions = {
   Hardcore: "Hardcore: High risk, tougher enemies, and intense progression.",
 };
 
+function buildUsernameFromName(name) {
+  const base = String(name || "").trim().toLowerCase();
+  if (!base) {
+    return "player";
+  }
+
+  return base.replace(/\s+/g, "_");
+}
+
+function getDefaultGameDetails() {
+  return {
+    day: 1,
+    stats: {
+      Level: 1,
+      EXP: 0,
+      "stat points available": 0,
+      str: 10,
+      agi: 10,
+      vit: 10,
+      int: 10,
+      end: 10,
+      per: 10,
+    },
+  };
+}
+
 const redirectDelayMs = 1000;
 const saveTimeoutMs = 12000;
 const fallbackSaveTimeoutMs = 12000;
@@ -155,7 +181,7 @@ function withTimeout(promise, timeoutMs) {
 }
 
 async function savePlayerDetails(uid, payload) {
-  const playerRef = ref(database, `players/${uid}/accountDetails`);
+  const playerRef = ref(database, `players/${uid}/account details`);
 
   try {
     await withTimeout(set(playerRef, payload), saveTimeoutMs);
@@ -183,7 +209,7 @@ async function savePlayerDetails(uid, payload) {
 
   const idToken = await activeUser.getIdToken();
   const response = await withTimeout(
-    fetch(`${databaseRestBaseUrl}/players/${uid}/accountDetails.json?auth=${encodeURIComponent(idToken)}`, {
+    fetch(`${databaseRestBaseUrl}/players/${uid}/account%20details.json?auth=${encodeURIComponent(idToken)}`, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -323,20 +349,14 @@ async function handleFormSubmit(event) {
   const creationInfo = getCreationDateTime();
 
   const payload = {
-    name,
+    username: buildUsernameFromName(name),
     email: activeUser.email ?? "",
     age,
-    creationDate: creationInfo.creationDate,
-    creationTime: creationInfo.creationTime,
-    difficultyLevel: {
-      easy: {
-        gameDetails: normalizedDifficulty === "easy" ? { stats: { playerLevel: 1, xp: 0 } } : {},
-      },
-      normal: {
-        gameDetails: normalizedDifficulty === "normal" ? { stats: { playerLevel: 1, xp: 0 } } : {},
-      },
-      hardcore: {
-        gameDetails: normalizedDifficulty === "hardcore" ? { stats: { playerLevel: 1, xp: 0 } } : {},
+    "account creation date": creationInfo.creationDate,
+    "account creation time": creationInfo.creationTime,
+    DifficultyLevel: {
+      [normalizedDifficulty]: {
+        gameDetails: getDefaultGameDetails(),
       },
     },
   };

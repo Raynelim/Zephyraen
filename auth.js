@@ -179,28 +179,52 @@ async function ensureUserDataInDatabase(user, emailFallback = "", nameFallback =
   const resolvedName = nameFallback || deriveNameFromEmail(resolvedEmail);
   const creationInfo = getCreationDateTime();
 
-  const accountDetailsRef = ref(database, `players/${user.uid}/accountDetails`);
+  const accountDetailsRef = ref(database, `players/${user.uid}/account details`);
+  const legacyAccountDetailsRef = ref(database, `players/${user.uid}/accountDetails`);
   const accountDetailsSnapshot = await get(accountDetailsRef);
-  const existingAccountDetails = accountDetailsSnapshot.exists() ? accountDetailsSnapshot.val() : {};
-  const existingDifficultyLevel = existingAccountDetails?.difficultyLevel ?? {};
+  const resolvedSnapshot = accountDetailsSnapshot.exists() ? accountDetailsSnapshot : await get(legacyAccountDetailsRef);
+  const existingAccountDetails = resolvedSnapshot.exists() ? resolvedSnapshot.val() : {};
+  const existingDifficultyLevel = existingAccountDetails?.DifficultyLevel ?? existingAccountDetails?.difficultyLevel ?? {};
+
+  const defaultDifficultyLevel =
+    Object.keys(existingDifficultyLevel).length > 0
+      ? existingDifficultyLevel
+      : {
+          normal: {
+            gameDetails: {
+              day: 1,
+              stats: {
+                Level: 1,
+                EXP: 0,
+                "stat points available": 0,
+                str: 10,
+                agi: 10,
+                vit: 10,
+                int: 10,
+                end: 10,
+                per: 10,
+              },
+            },
+          },
+        };
 
   await set(accountDetailsRef, {
-    name: existingAccountDetails?.name || resolvedName,
+    username:
+      existingAccountDetails?.username ||
+      (existingAccountDetails?.name
+        ? String(existingAccountDetails.name)
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "_")
+        : deriveNameFromEmail(resolvedEmail)
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "_")),
     email: existingAccountDetails?.email || resolvedEmail,
     age: existingAccountDetails?.age ?? null,
-    creationDate: existingAccountDetails?.creationDate || creationInfo.creationDate,
-    creationTime: existingAccountDetails?.creationTime || creationInfo.creationTime,
-    difficultyLevel: {
-      easy: {
-        gameDetails: existingDifficultyLevel?.easy?.gameDetails ?? {},
-      },
-      normal: {
-        gameDetails: existingDifficultyLevel?.normal?.gameDetails ?? {},
-      },
-      hardcore: {
-        gameDetails: existingDifficultyLevel?.hardcore?.gameDetails ?? {},
-      },
-    },
+    "account creation date": existingAccountDetails?.["account creation date"] || creationInfo.creationDate,
+    "account creation time": existingAccountDetails?.["account creation time"] || creationInfo.creationTime,
+    DifficultyLevel: defaultDifficultyLevel,
   });
 }
 
