@@ -170,6 +170,52 @@ function getCreationDateTime() {
   };
 }
 
+function normalizeDifficultyLevel(value, fallback = "normal") {
+  const supportedLevels = new Set(["easy", "normal", "hardcore"]);
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (supportedLevels.has(normalized)) {
+    return normalized;
+  }
+
+  return supportedLevels.has(fallback) ? fallback : "normal";
+}
+
+function getDefaultGamePayload(difficultyLevel = "normal") {
+  return {
+    "difficulty level": normalizeDifficultyLevel(difficultyLevel),
+    day: 1,
+    stats: {
+      Level: 1,
+      EXP: 0,
+      "stat points available": 0,
+      str: 10,
+      agi: 10,
+      vit: 10,
+      int: 10,
+      end: 10,
+      per: 10,
+    },
+    combat: {
+      theWreckage: {
+        sodierAnt: { status: "undiscovered", kills: 0 },
+        bombardierBeetle: { status: "undiscovered", kills: 0 },
+        rubbleScarab: { status: "undiscovered", kills: 0 },
+        jumpingSpider: { status: "undiscovered", kills: 0 },
+        IroncrustBeetle: { status: "undiscovered", kills: 0 },
+        goliathAlphaBeetle: { status: "undiscovered", kills: 0 },
+      },
+    },
+    skills: {
+      fractureSlash: { status: "installed", "upgrade status": "none" },
+      carapaceLock: { status: "installed", "upgrade status": "none" },
+      tacticalScan: { status: "uninstalled", "upgrade status": "none" },
+      surgeStep: { status: "uninstalled", "upgrade status": "none" },
+      venomPurge: { status: "uninstalled", "upgrade status": "none" },
+      exoPulse: { status: "uninstalled", "upgrade status": "none" },
+    },
+  };
+}
+
 async function ensureUserDataInDatabase(user, emailFallback = "", nameFallback = "") {
   if (!user?.uid) {
     return;
@@ -186,27 +232,27 @@ async function ensureUserDataInDatabase(user, emailFallback = "", nameFallback =
   const existingAccountDetails = resolvedSnapshot.exists() ? resolvedSnapshot.val() : {};
   const existingDifficultyLevel = existingAccountDetails?.DifficultyLevel ?? existingAccountDetails?.difficultyLevel ?? {};
 
+  const preferredOrder = ["easy", "normal", "hardcore"];
+  const firstValidLegacyDifficulty = preferredOrder.find((level) => Boolean(existingDifficultyLevel?.[level]?.gameDetails));
+  const resolvedDifficulty = normalizeDifficultyLevel(existingAccountDetails?.game?.["difficulty level"], firstValidLegacyDifficulty || "normal");
+
   const defaultDifficultyLevel =
     Object.keys(existingDifficultyLevel).length > 0
       ? existingDifficultyLevel
       : {
           normal: {
-            gameDetails: {
-              day: 1,
-              stats: {
-                Level: 1,
-                EXP: 0,
-                "stat points available": 0,
-                str: 10,
-                agi: 10,
-                vit: 10,
-                int: 10,
-                end: 10,
-                per: 10,
-              },
-            },
+            gameDetails: getDefaultGamePayload("normal"),
           },
         };
+
+  const resolvedGamePayload =
+    existingAccountDetails?.game && typeof existingAccountDetails.game === "object"
+      ? {
+          ...getDefaultGamePayload(resolvedDifficulty),
+          ...existingAccountDetails.game,
+          "difficulty level": normalizeDifficultyLevel(existingAccountDetails.game?.["difficulty level"], resolvedDifficulty),
+        }
+      : getDefaultGamePayload(resolvedDifficulty);
 
   await set(accountDetailsRef, {
     username:
@@ -224,6 +270,7 @@ async function ensureUserDataInDatabase(user, emailFallback = "", nameFallback =
     age: existingAccountDetails?.age ?? null,
     "account creation date": existingAccountDetails?.["account creation date"] || creationInfo.creationDate,
     "account creation time": existingAccountDetails?.["account creation time"] || creationInfo.creationTime,
+    game: resolvedGamePayload,
     DifficultyLevel: defaultDifficultyLevel,
   });
 }

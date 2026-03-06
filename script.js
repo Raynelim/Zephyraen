@@ -2,12 +2,15 @@ import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/
 import { get, onValue, ref, set } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-database.js";
 import { auth, database } from "./firebase.js?v=20260302r";
 
-const activities = ["Village", "Combat", "Profile"];
+const activities = ["Profile", "Village", "Combat"];
 const levelCap = 20;
 const statPointsPerLevel = 5;
 const baseStatValue = 10;
 const realMsPerGameDay = 300_000;
 const inGameMinutesPerDay = 24 * 60;
+const defaultSkillTreeZoom = 0.7;
+const defaultSkillTreePanX = 120;
+const defaultSkillTreePanY = 0;
 const area1CombatDbKey = "theWreckage";
 const area1CombatEnemyOrder = [
   { key: "sodierAnt", displayName: "Soldier Ant" },
@@ -60,6 +63,422 @@ const coreStats = [
   },
 ];
 
+const skillTreeMainSkills = [
+  {
+    key: "fractureSlash",
+    name: "Fracture Slash",
+    unlockLevel: "Level 1",
+    staminaCost: "15 ST",
+    description:
+      "The CHITIN-FRAME drives a reinforced forearm blade into the target. Deals 140% ATK as physical damage.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "5 Stat Points",
+        description: "Damage increases to 160% ATK.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "7 Stat Points",
+        description: "Damage increases to 185% ATK and applies minor STAGGER on critical hit.",
+      },
+    ],
+  },
+  {
+    key: "carapaceLock",
+    name: "Carapace Lock",
+    unlockLevel: "Level 1",
+    staminaCost: "20 ST",
+    description:
+      "The suit hardens its outer plating for one turn. Reduces incoming damage by 35% until the player's next turn.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "4 Stat Points",
+        description: "Damage reduction increases to 45%.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "7 Stat Points",
+        description: "Damage reduction increases to 55% and reflects 60% of blocked damage to the attacker.",
+      },
+    ],
+  },
+  {
+    key: "tacticalScan",
+    name: "Tactical Scan",
+    unlockLevel: "Level 5",
+    staminaCost: "5 ST",
+    description:
+      "The CHITIN-FRAME performs a rapid deep-scan of the target enemy. Lowers enemy DEF 10% for 2 turns.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "4 Stat Points",
+        description: "The CHITIN-FRAME performs a rapid deep-scan of the target enemy. Lowers enemy DEF by 20% for 2 turns.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "7 Stat Points",
+        description: "The CHITIN-FRAME performs a rapid deep-scan of the target enemy. Lowers enemy DEF by 35% until the enemy is defeated.",
+      },
+    ],
+  },
+  {
+    key: "surgeStep",
+    name: "Surge Step",
+    unlockLevel: "Level 10",
+    staminaCost: "20 ST",
+    description:
+      "A burst of exo-assisted movement. Increases AGI by 20% for 2 turns. Does not stack with itself.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "5 Stat Points",
+        description: "A burst of exo-assisted movement. Increases AGI by 30% for 2 turns. Does not stack with itself.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "6 Stat Points",
+        description: "Grants the player an additional action this turn. Stamina cost increases to 30 ST.",
+      },
+    ],
+  },
+  {
+    key: "venomPurge",
+    name: "Venom Purge",
+    unlockLevel: "Level 13",
+    staminaCost: "15 ST",
+    description:
+      "The CHITIN-FRAME flushes the host's biological interface, clearing one random active status effect. Works on all statuses.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "6 Stat Points",
+        description: "Clears all status effects.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "8 Stat Points",
+        description: "Grants an additional 15% stat boost to all stats for 2 turns. Does not stack with itself.",
+      },
+    ],
+  },
+  {
+    key: "exoPulse",
+    name: "Exo-Pulse",
+    unlockLevel: "Level 18",
+    staminaCost: "40 ST",
+    description:
+      "Releases a burst of kinetic energy from the CHITIN-FRAME's power core. Deals 220% ATK as energy damage. Skips your next turn due to energy overload.",
+    upgrades: [
+      {
+        title: "Rank 2 Upgrade",
+        cost: "6 Stat Points",
+        description: "Changes stamina cost from 40 ST to 30 ST.",
+      },
+      {
+        title: "Rank 3 Upgrade",
+        cost: "10 Stat Points",
+        description:
+          "Releases a burst of kinetic energy from the CHITIN-FRAME's power core. Deals 190% ATK as energy damage. Applies BURN onto the enemy. Skips your next turn due to energy overload.",
+      },
+    ],
+  },
+];
+
+const startingSkillKeySet = new Set(["fractureSlash", "carapaceLock"]);
+const supportedDifficultyLevels = new Set(["easy", "normal", "hardcore"]);
+
+function normalizeDifficultyLevel(value, fallback = "normal") {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (supportedDifficultyLevels.has(normalized)) {
+    return normalized;
+  }
+
+  return supportedDifficultyLevels.has(fallback) ? fallback : "normal";
+}
+
+function getDefaultSkillsPayload() {
+  const basicSkills = Object.fromEntries(
+    skillTreeMainSkills.map((skill) => [
+      skill.key,
+      {
+        status: startingSkillKeySet.has(skill.key) ? "installed" : "uninstalled",
+        "upgrade status": "none",
+      },
+    ])
+  );
+
+  return {
+    BasicSkills: basicSkills,
+    EvoClassSkills: {},
+  };
+}
+
+function getSkillProgressFromPayloadSkills(payloadSkills) {
+  const incomingSkillsRoot = payloadSkills && typeof payloadSkills === "object" ? payloadSkills : {};
+  const incomingBasicSkills =
+    incomingSkillsRoot.BasicSkills && typeof incomingSkillsRoot.BasicSkills === "object"
+      ? incomingSkillsRoot.BasicSkills
+      : incomingSkillsRoot;
+
+  return Object.fromEntries(
+    skillTreeMainSkills.map((skill) => {
+      const incoming = incomingBasicSkills[skill.key] ?? {};
+      const rawStatus = String(incoming.status ?? "").trim().toLowerCase();
+      const rawUpgradeStatus = String(incoming["upgrade status"] ?? incoming.upgradeStatus ?? "none")
+        .trim()
+        .toLowerCase();
+
+      const installed = startingSkillKeySet.has(skill.key) || rawStatus === "installed";
+      const upgrades = [false, false];
+      if (rawUpgradeStatus === "upgrade 1" || rawUpgradeStatus === "max") {
+        upgrades[0] = true;
+      }
+      if (rawUpgradeStatus === "max") {
+        upgrades[1] = true;
+      }
+
+      return [
+        skill.key,
+        {
+          installed,
+          upgrades,
+        },
+      ];
+    })
+  );
+}
+
+function getSkillsPayloadFromProgress(progressState) {
+  const progress = progressState && typeof progressState === "object" ? progressState : {};
+
+  const basicSkillsPayload = Object.fromEntries(
+    skillTreeMainSkills.map((skill) => {
+      const node = progress[skill.key] ?? { installed: startingSkillKeySet.has(skill.key), upgrades: [false, false] };
+      const installed = startingSkillKeySet.has(skill.key) || Boolean(node.installed);
+      const upgrades = Array.isArray(node.upgrades) ? node.upgrades : [false, false];
+
+      let upgradeStatus = "none";
+      if (Boolean(upgrades[1])) {
+        upgradeStatus = "max";
+      } else if (Boolean(upgrades[0])) {
+        upgradeStatus = "upgrade 1";
+      }
+
+      return [
+        skill.key,
+        {
+          status: installed ? "installed" : "uninstalled",
+          "upgrade status": upgradeStatus,
+        },
+      ];
+    })
+  );
+
+  return {
+    BasicSkills: basicSkillsPayload,
+    EvoClassSkills: {},
+  };
+}
+
+function getSpentSkillStatPoints(progressState) {
+  const progress = progressState && typeof progressState === "object" ? progressState : {};
+
+  return skillTreeMainSkills.reduce((totalCost, skill) => {
+    const node = progress[skill.key] ?? {};
+    const upgrades = Array.isArray(node.upgrades) ? node.upgrades : [];
+
+    const spentOnSkill = skill.upgrades.reduce((subtotal, upgrade, index) => {
+      if (!upgrades[index]) {
+        return subtotal;
+      }
+
+      return subtotal + parseStatPointCost(upgrade.cost);
+    }, 0);
+
+    return totalCost + spentOnSkill;
+  }, 0);
+}
+
+function parseSkillUnlockLevel(unlockLevel) {
+  const match = String(unlockLevel ?? "").match(/\d+/);
+  return match ? Number(match[0]) : 1;
+}
+
+function parseStatPointCost(costLabel) {
+  const match = String(costLabel ?? "").match(/\d+/);
+  return match ? Number(match[0]) : 0;
+}
+
+function ensureSkillTreeProgressState() {
+  if (!state.skillTreeProgress || typeof state.skillTreeProgress !== "object") {
+    state.skillTreeProgress = {};
+  }
+
+  skillTreeMainSkills.forEach((skill) => {
+    const existing = state.skillTreeProgress[skill.key];
+    if (!existing || typeof existing !== "object") {
+      state.skillTreeProgress[skill.key] = {
+        installed: startingSkillKeySet.has(skill.key),
+        upgrades: skill.upgrades.map(() => false),
+      };
+      return;
+    }
+
+    if (!Array.isArray(existing.upgrades)) {
+      existing.upgrades = skill.upgrades.map(() => false);
+      return;
+    }
+
+    if (existing.upgrades.length !== skill.upgrades.length) {
+      existing.upgrades = skill.upgrades.map((_, index) => Boolean(existing.upgrades[index]));
+    }
+
+    if (startingSkillKeySet.has(skill.key)) {
+      existing.installed = true;
+    }
+  });
+}
+
+function getSkillDescriptionHtml(skill, progress) {
+  const hasUpgrade1 = Boolean(progress?.upgrades?.[0]);
+  const hasUpgrade2 = Boolean(progress?.upgrades?.[1]);
+
+  if (skill.key === "carapaceLock") {
+    if (hasUpgrade2) {
+      return `The suit hardens its outer plating for one turn. Reduces incoming damage by <span class="skilltree-highlight-green">(55%)</span> until the player's next turn, <span class="skilltree-highlight-green">(and reflects 60% of blocked damage to the attacker.)</span>`;
+    }
+
+    if (hasUpgrade1) {
+      return `The suit hardens its outer plating for one turn. Reduces incoming damage by <span class="skilltree-highlight-green">(45%)</span> until the player's next turn.`;
+    }
+
+    return skill.description;
+  }
+
+  if (skill.key === "tacticalScan") {
+    if (hasUpgrade2) {
+      return `The CHITIN-FRAME performs a rapid deep-scan of the target enemy. Lowers enemy DEF by <span class="skilltree-highlight-green">(35%)</span> <span class="skilltree-highlight-green">(until the enemy is defeated.)</span>`;
+    }
+
+    if (hasUpgrade1) {
+      return `The CHITIN-FRAME performs a rapid deep-scan of the target enemy. Lowers enemy DEF by <span class="skilltree-highlight-green">(20%)</span> for 2 turns.`;
+    }
+
+    return skill.description;
+  }
+
+  if (skill.key === "surgeStep") {
+    if (hasUpgrade2) {
+      return `A burst of exo-assisted movement. Increases AGI by <span class="skilltree-highlight-green">(30%)</span> for 2 turns. <span class="skilltree-highlight-green">(Grants the player an additional action this turn. )</span> Does not stack with itself.`;
+    }
+
+    if (hasUpgrade1) {
+      return `A burst of exo-assisted movement. Increases AGI by <span class="skilltree-highlight-green">(30%)</span> for 2 turns. Does not stack with itself.`;
+    }
+
+    return skill.description;
+  }
+
+  if (skill.key === "venomPurge") {
+    if (hasUpgrade2) {
+      return `The CHITIN-FRAME flushes the host's biological interface, clearing <span class="skilltree-highlight-green">(all)</span> active status effects. Works on all statuses. <span class="skilltree-highlight-green">(Grants an additional 15% stat boost to all stats for 2 turns. Does not stack with itself.)</span>`;
+    }
+
+    if (hasUpgrade1) {
+      return `The CHITIN-FRAME flushes the host's biological interface, clearing <span class="skilltree-highlight-green">(all)</span> active status effects. Works on all statuses.`;
+    }
+
+    return skill.description;
+  }
+
+  if (skill.key === "exoPulse") {
+    if (hasUpgrade2) {
+      return `Releases a burst of kinetic energy from the CHITIN-FRAME's power core. Deals <span class="skilltree-highlight-green">(190%)</span> ATK as energy damage. <span class="skilltree-highlight-green">(Applies BURN onto the enemy)</span> Skips your next turn due to energy overload.`;
+    }
+
+    if (hasUpgrade1) {
+      return `Releases a burst of kinetic energy from the CHITIN-FRAME's power core. Deals 220% ATK as energy damage. Skips your next turn due to energy overload.`;
+    }
+
+    return skill.description;
+  }
+
+  if (skill.key !== "fractureSlash") {
+    return skill.description;
+  }
+
+  if (hasUpgrade2) {
+    return `The CHITIN-FRAME drives a reinforced forearm blade into the target. Deals <span class="skilltree-highlight-green">(185%)</span> ATK as physical damage <span class="skilltree-highlight-green">(and applies minor STAGGER on critical hit.)</span> The most basic offensive skill — available from the first combat encounter.`;
+  }
+
+  if (hasUpgrade1) {
+    return `The CHITIN-FRAME drives a reinforced forearm blade into the target. Deals <span class="skilltree-highlight-green">(160%)</span> ATK as physical damage. The most basic offensive skill — available from the first combat encounter.`;
+  }
+
+  return skill.description;
+}
+
+function getSkillStaminaCostHtml(skill, progress) {
+  const hasUpgrade1 = Boolean(progress?.upgrades?.[0]);
+  const hasUpgrade2 = Boolean(progress?.upgrades?.[1]);
+
+  if (skill.key === "exoPulse" && hasUpgrade1) {
+    return `40 ST → <span class="skilltree-highlight-green">30 ST</span>`;
+  }
+
+  if (skill.key === "surgeStep" && hasUpgrade2) {
+    return `20 ST → <span class="skilltree-highlight-green">30 ST</span>`;
+  }
+
+  return skill.staminaCost;
+}
+
+function captureSkillTreeOpenState() {
+  if (!ui.text) {
+    return;
+  }
+
+  state.skillTreeOpenCards = Array.from(ui.text.querySelectorAll(".skilltree-node-card[open]"))
+    .map((card) => card.dataset.skillNode)
+    .filter(Boolean);
+
+  state.skillTreeOpenUpgrades = Array.from(ui.text.querySelectorAll(".skilltree-upgrade-item[open]"))
+    .map((item) => {
+      const skillKey = item.dataset.skillKey;
+      const upgradeRank = item.dataset.upgradeRank;
+      return skillKey && upgradeRank ? `${skillKey}:${upgradeRank}` : "";
+    })
+    .filter(Boolean);
+}
+
+function restoreSkillTreeOpenState() {
+  if (!ui.text) {
+    return;
+  }
+
+  const openCardKeys = new Set(state.skillTreeOpenCards ?? []);
+  const openUpgradeKeys = new Set(state.skillTreeOpenUpgrades ?? []);
+
+  ui.text.querySelectorAll(".skilltree-node-card").forEach((card) => {
+    const skillKey = card.dataset.skillNode;
+    if (skillKey && openCardKeys.has(skillKey)) {
+      card.open = true;
+    }
+  });
+
+  ui.text.querySelectorAll(".skilltree-upgrade-item").forEach((item) => {
+    const skillKey = item.dataset.skillKey;
+    const upgradeRank = item.dataset.upgradeRank;
+    const composite = skillKey && upgradeRank ? `${skillKey}:${upgradeRank}` : "";
+    if (composite && openUpgradeKeys.has(composite)) {
+      item.open = true;
+    }
+  });
+}
+
 function getDefaultCoreStats() {
   return {
     strength: baseStatValue,
@@ -71,12 +490,13 @@ function getDefaultCoreStats() {
   };
 }
 
-function getDefaultGameDetailsPayload() {
+function getDefaultGameDetailsPayload(difficultyLevel = "normal") {
   const defaultArea1CombatProgress = Object.fromEntries(
     area1CombatEnemyOrder.map((enemy) => [enemy.key, { status: "undiscovered", kills: 0 }])
   );
 
   return {
+    "difficulty level": normalizeDifficultyLevel(difficultyLevel),
     day: 1,
     stats: {
       Level: 1,
@@ -92,6 +512,7 @@ function getDefaultGameDetailsPayload() {
     combat: {
       [area1CombatDbKey]: defaultArea1CombatProgress,
     },
+    skills: getDefaultSkillsPayload(),
   };
 }
 
@@ -201,10 +622,12 @@ function isPayloadEquivalent(rawValue, payload) {
   return JSON.stringify(rawValue) === JSON.stringify(payload);
 }
 
-function normalizeGameDetailsPayload(rawGameDetails) {
-  const defaults = getDefaultGameDetailsPayload();
+function normalizeGameDetailsPayload(rawGameDetails, fallbackDifficultyLevel = "normal") {
+  const defaults = getDefaultGameDetailsPayload(fallbackDifficultyLevel);
   const incoming = rawGameDetails && typeof rawGameDetails === "object" ? rawGameDetails : {};
   const incomingStats = incoming.stats && typeof incoming.stats === "object" ? incoming.stats : incoming;
+  const incomingSkills = incoming?.skills;
+  const progressFromPayload = getSkillProgressFromPayloadSkills(incomingSkills);
 
   const rawLevel = Number(incomingStats.Level ?? incomingStats.playerLevel ?? incoming.level ?? defaults.stats.Level);
   const rawXp = Number(incomingStats.EXP ?? incomingStats.xp ?? defaults.stats.EXP);
@@ -228,18 +651,23 @@ function normalizeGameDetailsPayload(rawGameDetails) {
     (normalizedStats.int - baseStatValue) +
     (normalizedStats.end - baseStatValue) +
     (normalizedStats.per - baseStatValue);
+  const spentSkillPoints = getSpentSkillStatPoints(progressFromPayload);
 
   const allocatablePoints = Math.max(0, (normalizedStats.Level - 1) * statPointsPerLevel);
-  normalizedStats["stat points available"] = Math.max(0, allocatablePoints - spentPoints);
+  normalizedStats["stat points available"] = Math.max(0, allocatablePoints - spentPoints - spentSkillPoints);
 
   const incomingArea1Combat = incoming?.combat?.[area1CombatDbKey] ?? incoming?.combat?.area1;
+  const normalizedDifficulty = normalizeDifficultyLevel(incoming?.["difficulty level"], fallbackDifficultyLevel);
+  const normalizedSkills = getSkillsPayloadFromProgress(progressFromPayload);
 
   const normalized = {
+    "difficulty level": normalizedDifficulty,
     day: Math.max(1, Math.round(Number(incoming.day ?? defaults.day) || defaults.day)),
     stats: normalizedStats,
     combat: {
       [area1CombatDbKey]: normalizeArea1CombatPayload(incomingArea1Combat),
     },
+    skills: normalizedSkills,
   };
 
   return {
@@ -250,7 +678,7 @@ function normalizeGameDetailsPayload(rawGameDetails) {
 }
 
 const state = {
-  page: "Village",
+  page: "Profile",
   day: 1,
   level: 1,
   xp: 0,
@@ -262,12 +690,19 @@ const state = {
   uid: null,
   name: "Player",
   email: "",
+  difficultyLevel: "normal",
   gameDetailsPath: "",
   clockAnchorDay: 1,
   clockAnchorRealMs: Date.now(),
   lastClockDay: 1,
   isPersistingDay: false,
   profileView: "overview",
+  profileSkillTreeZoom: defaultSkillTreeZoom,
+  profileSkillTreePanX: defaultSkillTreePanX,
+  profileSkillTreePanY: defaultSkillTreePanY,
+  skillTreeProgress: {},
+  skillTreeOpenCards: [],
+  skillTreeOpenUpgrades: [],
   combat: {
     selectedArea: null,
     area1Kills: 0,
@@ -296,6 +731,8 @@ let statsUnsubscribe = null;
 let clockTicker = null;
 
 function getGameDetailsPayloadFromState() {
+  ensureSkillTreeProgressState();
+
   const area1CombatPayload = Object.fromEntries(
     area1CombatEnemyOrder.map((enemy) => {
       const kills = parseKillCount(state.combat.area1EnemyKills[enemy.key]);
@@ -310,6 +747,7 @@ function getGameDetailsPayloadFromState() {
   );
 
   return {
+    "difficulty level": normalizeDifficultyLevel(state.difficultyLevel),
     day: state.day,
     stats: {
       Level: state.level,
@@ -325,13 +763,15 @@ function getGameDetailsPayloadFromState() {
     combat: {
       [area1CombatDbKey]: area1CombatPayload,
     },
+    skills: getSkillsPayloadFromProgress(state.skillTreeProgress),
   };
 }
 
 function recalculateDerivedState() {
   const spentPoints = coreStats.reduce((total, stat) => total + (state.coreStats[stat.key] - baseStatValue), 0);
+  const spentSkillPoints = getSpentSkillStatPoints(state.skillTreeProgress);
   const allocatablePoints = Math.max(0, (state.level - 1) * statPointsPerLevel);
-  state.statPoints = Math.max(0, allocatablePoints - spentPoints);
+  state.statPoints = Math.max(0, allocatablePoints - spentPoints - spentSkillPoints);
   state.xpRequired = xpForLevel(state.level);
 }
 
@@ -426,10 +866,11 @@ function startWorldClock() {
   }, 1000);
 }
 
-function addLog(message) {
+function addLog(message, type = "info") {
   const snapshot = getWorldClockSnapshot();
   state.log.unshift({
     message,
+    type,
     day: snapshot.day,
     time: snapshot.timeText,
     phaseIcon: snapshot.phaseIcon,
@@ -496,10 +937,10 @@ function renderLog() {
     .map((entry) => {
       const normalized =
         typeof entry === "string"
-          ? { message: entry, day: state.day, time: "--:--", phaseIcon: "●", phaseLabel: "LOG" }
+          ? { message: entry, type: "info", day: state.day, time: "--:--", phaseIcon: "●", phaseLabel: "LOG" }
           : entry;
 
-      return `<li><div class="log-meta"><span class="log-phase">${normalized.phaseIcon} ${normalized.phaseLabel}</span><span class="log-stamp">D${normalized.day} // ${normalized.time}</span></div><p class="log-message">${normalized.message}</p></li>`;
+      return `<li><div class="log-meta"><span class="log-phase">${normalized.phaseIcon} ${normalized.phaseLabel}</span><span class="log-stamp">D${normalized.day} // ${normalized.time}</span></div><p class="log-message log-message-${normalized.type ?? "info"}">${normalized.message}</p></li>`;
     })
     .join("");
 }
@@ -643,9 +1084,12 @@ function renderKnownValue(isKnown, knownText, unknownClass = "") {
 
 function resetContentLayout() {
   ui.contentFrame?.classList.remove("combat-layout");
+  ui.contentFrame?.classList.remove("skilltree-layout");
   ui.ascii?.classList.remove("combat-sidebar");
+  ui.ascii?.classList.remove("skilltree-hidden");
   ui.text?.classList.remove("combat-main");
   ui.text?.classList.remove("profile-main");
+  ui.text?.classList.remove("skilltree-main");
 }
 
 function renderCombatAreaSelect() {
@@ -973,14 +1417,14 @@ function renderProfilePage() {
   const topBranchRows = coreStats.slice(0, 3).map((stat) => renderBranchNode(stat, "top")).join("");
   const bottomBranchRows = coreStats.slice(3, 6).map((stat) => renderBranchNode(stat, "bottom")).join("");
 
-  if (state.profileView === "skilltree") {
+  if (state.profileView === "coregrowth") {
     ui.text.innerHTML = `
       <div class="profile-grid profile-grid-skilltree">
         <section class="profile-card profile-skilltree">
           <div class="profile-skilltree-top">
             <button class="option-btn" data-profile-back="overview">← Back to Profile</button>
           </div>
-          <h3>Skill Tree</h3>
+          <h3>Core Growth</h3>
           <p class="inline-tag profile-skilltree-subline">LEVEL 1-20 BRANCHES : 6 MAIN STATS</p>
           <div class="profile-tree-layout profile-tree-diagram">
             <div class="profile-tree-row profile-tree-row-top">${topBranchRows}</div>
@@ -1006,11 +1450,6 @@ function renderProfilePage() {
             <div class="profile-tree-row profile-tree-row-bottom">${bottomBranchRows}</div>
           </div>
         </section>
-
-        <section class="profile-card profile-skills">
-          <h3>Skills</h3>
-          <div class="profile-skills-empty"></div>
-        </section>
       </div>
     `;
 
@@ -1025,6 +1464,321 @@ function renderProfilePage() {
       state.profileView = "overview";
       render();
     });
+
+    ui.text.querySelectorAll("[data-skilltree-skill]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const skillKey = button.dataset.skilltreeSkill;
+        if (!skillKey) {
+          return;
+        }
+
+        const targetCard = ui.text.querySelector(`[data-skill-card="${skillKey}"]`);
+        if (!targetCard) {
+          return;
+        }
+
+        targetCard.open = !targetCard.open;
+        if (targetCard.open) {
+          targetCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    });
+
+    return;
+  }
+
+  if (state.profileView === "skilltree") {
+    ui.contentFrame?.classList.add("skilltree-layout");
+    ui.ascii?.classList.add("skilltree-hidden");
+    ui.text?.classList.add("skilltree-main");
+
+    ensureSkillTreeProgressState();
+
+    const renderSkillNode = (skill) => {
+      const progress = state.skillTreeProgress[skill.key];
+      const unlockLevelNumber = parseSkillUnlockLevel(skill.unlockLevel);
+      const canInstall = state.level >= unlockLevelNumber;
+      const skillDescriptionHtml = getSkillDescriptionHtml(skill, progress);
+      const staminaCostHtml = getSkillStaminaCostHtml(skill, progress);
+
+      const installControl = progress.installed
+        ? '<div class="skilltree-status-box">Installed</div>'
+        : `<button class="action-btn skilltree-action-btn" data-skill-install="${skill.key}">Install</button>`;
+
+      const upgradeCards = skill.upgrades
+        .map(
+          (upgrade, index) => {
+            const isUpgraded = Boolean(progress.upgrades[index]);
+            const requiredStatPoints = parseStatPointCost(upgrade.cost);
+            const previousRankUpgraded = index === 0 ? true : Boolean(progress.upgrades[index - 1]);
+            const canUpgrade = progress.installed && previousRankUpgraded && state.statPoints >= requiredStatPoints;
+            const actionControl = isUpgraded
+              ? '<div class="skilltree-status-box">Upgraded</div>'
+              : `<button class="action-btn skilltree-action-btn" data-skill-upgrade="${skill.key}" data-upgrade-rank="${index}">Upgrade</button>`;
+
+            if (isUpgraded) {
+              return `
+            <div class="skilltree-upgrade-item skilltree-upgrade-item-complete">
+              <div class="skilltree-upgrade-head">
+                <span>Upgrade ${index + 1}</span>
+                <span>${upgrade.cost}</span>
+                ${actionControl}
+              </div>
+            </div>
+          `;
+            }
+
+            return `
+            <details class="skilltree-upgrade-item" data-skill-key="${skill.key}" data-upgrade-rank="${index}">
+              <summary>Upgrade ${index + 1} <span>${upgrade.cost}</span></summary>
+              <p>${upgrade.description}</p>
+              <div class="skilltree-upgrade-actions">${actionControl}</div>
+            </details>
+          `;
+          }
+        )
+        .join("");
+
+      return `
+        <details class="skilltree-node-card" data-skill-node="${skill.key}">
+          <summary class="skilltree-node-summary">${skill.name}</summary>
+          <div class="skilltree-node-content">
+            <div class="skilltree-skill-meta-wrap">
+              <div class="skilltree-skill-meta">
+                <p class="skilltree-meta-row"><span class="skilltree-meta-label">Unlock Level</span><span class="skilltree-meta-value">${skill.unlockLevel}</span></p>
+                <p class="skilltree-meta-row"><span class="skilltree-meta-label">Stamina Cost</span><span class="skilltree-meta-value">${staminaCostHtml}</span></p>
+              </div>
+              <div class="skilltree-meta-action">${installControl}</div>
+            </div>
+            <div class="skilltree-divider" aria-hidden="true"></div>
+            <p class="skilltree-skill-description">${skillDescriptionHtml}</p>
+            <div class="skilltree-divider" aria-hidden="true"></div>
+            <div class="skilltree-upgrade-list">${upgradeCards}</div>
+          </div>
+        </details>
+      `;
+    };
+
+    ui.text.innerHTML = `
+      <div class="skilltree-page">
+        <div class="skilltree-controls-wrap">
+          <button class="option-btn" data-profile-back="overview">← Back to Profile</button>
+        </div>
+
+        <div class="skilltree-scroll-area">
+          <div class="skilltree-canvas" style="--skilltree-scale: ${state.profileSkillTreeZoom}; --skilltree-pan-x: ${state.profileSkillTreePanX}px; --skilltree-pan-y: ${state.profileSkillTreePanY}px;">
+            <div class="skilltree-diagram skilltree-diagram-linear">
+              <div class="skilltree-linear-track" aria-hidden="true"></div>
+              <div class="skilltree-linear-row">${skillTreeMainSkills.map((skill) => renderSkillNode(skill)).join("")}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    ui.text.querySelector("[data-profile-back='overview']")?.addEventListener("click", () => {
+      state.profileView = "overview";
+      render();
+    });
+
+    restoreSkillTreeOpenState();
+
+    ui.text.querySelectorAll("[data-skill-install]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const skillKey = button.dataset.skillInstall;
+        if (!skillKey) {
+          return;
+        }
+
+        const skill = skillTreeMainSkills.find((entry) => entry.key === skillKey);
+        const progress = state.skillTreeProgress[skillKey];
+        if (!skill || !progress) {
+          return;
+        }
+
+        if (progress.installed) {
+          return;
+        }
+
+        const requiredLevel = parseSkillUnlockLevel(skill.unlockLevel);
+        if (state.level < requiredLevel) {
+          addLog("UNABLE TO INSTALL SKILL AS REQUIREMENTS ARE NOT MET.", "error");
+          renderLog();
+          return;
+        }
+
+        progress.installed = true;
+        captureSkillTreeOpenState();
+        addLog(`${skill.name} has been installed successfully`, "success");
+        try {
+          await persistStats();
+        } catch (error) {
+          console.error("Failed to persist skill install:", error);
+          addLog("Sync warning: skill install could not be saved.");
+        }
+        render();
+      });
+    });
+
+    ui.text.querySelectorAll("[data-skill-upgrade]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const skillKey = button.dataset.skillUpgrade;
+        const rank = Number(button.dataset.upgradeRank);
+        if (!skillKey || Number.isNaN(rank)) {
+          return;
+        }
+
+        const skill = skillTreeMainSkills.find((entry) => entry.key === skillKey);
+        const progress = state.skillTreeProgress[skillKey];
+        if (!skill || !progress || !Array.isArray(progress.upgrades)) {
+          return;
+        }
+
+        if (!progress.installed) {
+          addLog("UNABLE TO UPGRADE SKILL AS REQUIREMENTS ARE NOT MET.", "error");
+          renderLog();
+          return;
+        }
+
+        if (progress.upgrades[rank]) {
+          return;
+        }
+
+        if (rank > 0 && !progress.upgrades[rank - 1]) {
+          addLog("UNABLE TO UPGRADE SKILL AS REQUIREMENTS ARE NOT MET.", "error");
+          renderLog();
+          return;
+        }
+
+        const requiredPoints = parseStatPointCost(skill.upgrades[rank]?.cost);
+        if (state.statPoints < requiredPoints) {
+          addLog("UNABLE TO UPGRADE SKILL AS REQUIREMENTS ARE NOT MET.", "error");
+          renderLog();
+          return;
+        }
+
+        progress.upgrades[rank] = true;
+        recalculateDerivedState();
+        captureSkillTreeOpenState();
+        const upgradedKey = `${skillKey}:${rank}`;
+        state.skillTreeOpenUpgrades = (state.skillTreeOpenUpgrades ?? []).filter((item) => item !== upgradedKey);
+        addLog(`${skill.name} // Upgrade ${rank + 1} Completed`, "success");
+        try {
+          await persistStats();
+        } catch (error) {
+          console.error("Failed to persist skill upgrade:", error);
+          addLog("Sync warning: skill upgrade could not be saved.");
+        }
+        render();
+      });
+    });
+
+    const skilltreePage = ui.text.querySelector(".skilltree-scroll-area");
+    const skilltreeCanvas = ui.text.querySelector(".skilltree-canvas");
+
+    const applySkillTreeTransform = () => {
+      if (!skilltreeCanvas) {
+        return;
+      }
+
+      skilltreeCanvas.style.setProperty("--skilltree-scale", String(state.profileSkillTreeZoom));
+      skilltreeCanvas.style.setProperty("--skilltree-pan-x", `${state.profileSkillTreePanX}px`);
+      skilltreeCanvas.style.setProperty("--skilltree-pan-y", `${state.profileSkillTreePanY}px`);
+    };
+
+    const zoomAtPoint = (clientX, clientY, direction) => {
+      if (!skilltreePage) {
+        return;
+      }
+
+      const oldZoom = state.profileSkillTreeZoom;
+      const nextZoom = Math.max(0.5, Math.min(2.5, Number((oldZoom + direction * 0.1).toFixed(2))));
+      if (nextZoom === oldZoom) {
+        return;
+      }
+
+      const rect = skilltreePage.getBoundingClientRect();
+      const localX = clientX - rect.left;
+      const localY = clientY - rect.top;
+      const worldX = (localX - state.profileSkillTreePanX) / oldZoom;
+      const worldY = (localY - state.profileSkillTreePanY) / oldZoom;
+
+      state.profileSkillTreeZoom = nextZoom;
+      state.profileSkillTreePanX = localX - worldX * nextZoom;
+      state.profileSkillTreePanY = localY - worldY * nextZoom;
+      applySkillTreeTransform();
+    };
+
+    if (skilltreePage) {
+      let isPanning = false;
+      let pointerId = null;
+      let startX = 0;
+      let startY = 0;
+      let startPanX = state.profileSkillTreePanX;
+      let startPanY = state.profileSkillTreePanY;
+
+      skilltreePage.addEventListener("pointerdown", (event) => {
+        if (
+          event.button !== 0 ||
+          event.target.closest(".skilltree-controls-wrap") ||
+          event.target.closest(".skilltree-node-card") ||
+          event.target.closest(".skilltree-upgrade-item")
+        ) {
+          return;
+        }
+
+        isPanning = true;
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        startPanX = state.profileSkillTreePanX;
+        startPanY = state.profileSkillTreePanY;
+        skilltreePage.classList.add("is-panning");
+        skilltreePage.setPointerCapture(event.pointerId);
+      });
+
+      skilltreePage.addEventListener("pointermove", (event) => {
+        if (!isPanning || event.pointerId !== pointerId) {
+          return;
+        }
+
+        const deltaX = event.clientX - startX;
+        const deltaY = event.clientY - startY;
+        const nextPanX = startPanX + deltaX;
+        const nextPanY = startPanY + deltaY;
+        state.profileSkillTreePanX = nextPanX;
+        state.profileSkillTreePanY = nextPanY;
+        if (skilltreeCanvas) {
+          skilltreeCanvas.style.setProperty("--skilltree-pan-x", `${nextPanX}px`);
+          skilltreeCanvas.style.setProperty("--skilltree-pan-y", `${nextPanY}px`);
+        }
+      });
+
+      const stopPanning = (event) => {
+        if (!isPanning || event.pointerId !== pointerId) {
+          return;
+        }
+
+        isPanning = false;
+        pointerId = null;
+        skilltreePage.classList.remove("is-panning");
+        if (skilltreePage.hasPointerCapture(event.pointerId)) {
+          skilltreePage.releasePointerCapture(event.pointerId);
+        }
+      };
+
+      skilltreePage.addEventListener("pointerup", stopPanning);
+      skilltreePage.addEventListener("pointercancel", stopPanning);
+    }
+
+    ui.text.querySelector(".skilltree-scroll-area")?.addEventListener(
+      "wheel",
+      (event) => {
+        event.preventDefault();
+        zoomAtPoint(event.clientX, event.clientY, event.deltaY < 0 ? 1 : -1);
+      },
+      { passive: false }
+    );
 
     return;
   }
@@ -1044,6 +1798,7 @@ function renderProfilePage() {
       </section>
 
       <section class="profile-card profile-actions">
+        <button class="option-btn" data-profile-open="coregrowth">Core Growth</button>
         <button class="option-btn" data-profile-open="skilltree">Skill Tree</button>
         <button class="option-btn" data-profile-action="tutorial">Tutorial Guide</button>
         <button class="option-btn" data-profile-action="logout">Log out</button>
@@ -1051,9 +1806,21 @@ function renderProfilePage() {
     </div>
   `;
 
-  ui.text.querySelector("[data-profile-open='skilltree']")?.addEventListener("click", () => {
-    state.profileView = "skilltree";
-    render();
+  ui.text.querySelectorAll("[data-profile-open]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const target = button.dataset.profileOpen;
+      if (!target) {
+        return;
+      }
+
+      state.profileView = target;
+      if (target === "skilltree") {
+        state.profileSkillTreeZoom = defaultSkillTreeZoom;
+        state.profileSkillTreePanX = defaultSkillTreePanX;
+        state.profileSkillTreePanY = defaultSkillTreePanY;
+      }
+      render();
+    });
   });
 
   ui.text.querySelectorAll("[data-profile-action]").forEach((button) => {
@@ -1119,21 +1886,38 @@ function subscribeToUserStats(uid) {
 
     const difficultyLevel = accountDetails?.DifficultyLevel ?? accountDetails?.difficultyLevel ?? {};
     const preferredOrder = ["easy", "normal", "hardcore"];
-    const firstValid = preferredOrder.find((level) => Boolean(difficultyLevel?.[level]?.gameDetails));
-    const normalizedDifficulty = firstValid || "normal";
+    const firstValidLegacyDifficulty = preferredOrder.find((level) => Boolean(difficultyLevel?.[level]?.gameDetails));
+    const accountGameDifficulty = accountDetails?.game?.["difficulty level"];
+    const normalizedDifficulty = normalizeDifficultyLevel(accountGameDifficulty, firstValidLegacyDifficulty || "normal");
 
-    const gameDetailsRef = ref(database, `players/${uid}/account details/DifficultyLevel/${normalizedDifficulty}/gameDetails`);
-    state.gameDetailsPath = `players/${uid}/account details/DifficultyLevel/${normalizedDifficulty}/gameDetails`;
+    const gameDetailsRef = ref(database, `players/${uid}/account details/game`);
+    const legacyGameDetailsRef = ref(database, `players/${uid}/account details/DifficultyLevel/${normalizedDifficulty}/gameDetails`);
+    state.gameDetailsPath = `players/${uid}/account details/game`;
+    state.difficultyLevel = normalizedDifficulty;
 
     statsUnsubscribe = onValue(gameDetailsRef, async (snapshot) => {
       if (!snapshot.exists()) {
-        await set(gameDetailsRef, getDefaultGameDetailsPayload());
+        const legacySnapshot = await get(legacyGameDetailsRef);
+        if (legacySnapshot.exists()) {
+          const legacyRaw = legacySnapshot.val();
+          const migrated = normalizeGameDetailsPayload(
+            {
+              ...(legacyRaw && typeof legacyRaw === "object" ? legacyRaw : {}),
+              "difficulty level": normalizedDifficulty,
+            },
+            normalizedDifficulty
+          );
+          await set(gameDetailsRef, migrated.payload);
+        } else {
+          await set(gameDetailsRef, getDefaultGameDetailsPayload(normalizedDifficulty));
+        }
         return;
       }
 
       const rawGameDetails = snapshot.val();
-      const { payload, shouldSave, leveledUpFromOverflowXp } = normalizeGameDetailsPayload(rawGameDetails);
+      const { payload, shouldSave, leveledUpFromOverflowXp } = normalizeGameDetailsPayload(rawGameDetails, normalizedDifficulty);
 
+      state.difficultyLevel = normalizeDifficultyLevel(payload["difficulty level"], normalizedDifficulty);
       state.day = payload.day;
       state.level = payload.stats.Level;
       state.xp = payload.stats.EXP;
@@ -1149,6 +1933,8 @@ function subscribeToUserStats(uid) {
       state.combat.area1EnemyKills = buildArea1EnemyKillsFromCombatPayload(payload.combat?.[area1CombatDbKey]);
       state.combat.area1EnemyStatus = buildArea1EnemyStatusFromCombatPayload(payload.combat?.[area1CombatDbKey]);
       state.combat.area1Kills = getArea1TotalKillsFromEnemyKills(state.combat.area1EnemyKills);
+      state.skillTreeProgress = getSkillProgressFromPayloadSkills(payload.skills);
+      ensureSkillTreeProgressState();
       recalculateDerivedState();
       setClockAnchor(state.day);
 

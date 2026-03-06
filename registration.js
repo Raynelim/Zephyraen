@@ -30,7 +30,28 @@ function buildUsernameFromName(name) {
 }
 
 function getDefaultGameDetails() {
+  const defaultCombat = {
+    theWreckage: {
+      sodierAnt: { status: "undiscovered", kills: 0 },
+      bombardierBeetle: { status: "undiscovered", kills: 0 },
+      rubbleScarab: { status: "undiscovered", kills: 0 },
+      jumpingSpider: { status: "undiscovered", kills: 0 },
+      IroncrustBeetle: { status: "undiscovered", kills: 0 },
+      goliathAlphaBeetle: { status: "undiscovered", kills: 0 },
+    },
+  };
+
+  const defaultSkills = {
+    fractureSlash: { status: "installed", "upgrade status": "none" },
+    carapaceLock: { status: "installed", "upgrade status": "none" },
+    tacticalScan: { status: "uninstalled", "upgrade status": "none" },
+    surgeStep: { status: "uninstalled", "upgrade status": "none" },
+    venomPurge: { status: "uninstalled", "upgrade status": "none" },
+    exoPulse: { status: "uninstalled", "upgrade status": "none" },
+  };
+
   return {
+    "difficulty level": "normal",
     day: 1,
     stats: {
       Level: 1,
@@ -43,6 +64,8 @@ function getDefaultGameDetails() {
       end: 10,
       per: 10,
     },
+    combat: defaultCombat,
+    skills: defaultSkills,
   };
 }
 
@@ -348,15 +371,21 @@ async function handleFormSubmit(event) {
 
   const creationInfo = getCreationDateTime();
 
+  const defaultGamePayload = {
+    ...getDefaultGameDetails(),
+    "difficulty level": normalizedDifficulty,
+  };
+
   const payload = {
     username: buildUsernameFromName(name),
     email: activeUser.email ?? "",
     age,
     "account creation date": creationInfo.creationDate,
     "account creation time": creationInfo.creationTime,
+    game: defaultGamePayload,
     DifficultyLevel: {
       [normalizedDifficulty]: {
-        gameDetails: getDefaultGameDetails(),
+        gameDetails: defaultGamePayload,
       },
     },
   };
