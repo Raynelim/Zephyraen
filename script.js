@@ -2,12 +2,24 @@ import { onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/
 import { get, onValue, ref, set } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-database.js";
 import { auth, database } from "./firebase.js?v=20260302r";
 
-const activities = ["Village", "Stats", "Settings"];
+const activities = ["Village", "Combat", "Stats", "Settings"];
 const levelCap = 20;
 const statPointsPerLevel = 5;
 const baseStatValue = 10;
 const realMsPerGameDay = 300_000;
 const inGameMinutesPerDay = 24 * 60;
+const area1CombatDbKey = "theWreckage";
+const area1CombatEnemyOrder = [
+  { key: "sodierAnt", displayName: "Soldier Ant" },
+  { key: "bombardierBeetle", displayName: "Bombardier Beetle" },
+  { key: "rubbleScarab", displayName: "Rubble Scarab" },
+  { key: "jumpingSpider", displayName: "Jumping Spider" },
+  { key: "IroncrustBeetle", displayName: "Ironcrust Beetle" },
+  { key: "goliathAlphaBeetle", displayName: "Goliath Beetle Alpha" },
+];
+
+const area1EncounterEnemyOrder = area1CombatEnemyOrder.filter((enemy) => enemy.key !== "goliathAlphaBeetle");
+const area1EnemyNameToCombatKey = Object.fromEntries(area1CombatEnemyOrder.map((enemy) => [enemy.displayName, enemy.key]));
 
 const coreStats = [
   {
@@ -60,6 +72,10 @@ function getDefaultCoreStats() {
 }
 
 function getDefaultGameDetailsPayload() {
+  const defaultArea1CombatProgress = Object.fromEntries(
+    area1CombatEnemyOrder.map((enemy) => [enemy.key, { status: "undiscovered", kills: 0 }])
+  );
+
   return {
     day: 1,
     stats: {
@@ -73,7 +89,64 @@ function getDefaultGameDetailsPayload() {
       end: baseStatValue,
       per: baseStatValue,
     },
+    combat: {
+      [area1CombatDbKey]: defaultArea1CombatProgress,
+    },
   };
+}
+
+function parseKillCount(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue < 0) {
+    return 0;
+  }
+
+  return Math.floor(numericValue);
+}
+
+function normalizeArea1CombatPayload(rawArea1Combat) {
+  const incomingArea1Combat = rawArea1Combat && typeof rawArea1Combat === "object" ? rawArea1Combat : {};
+  const normalizedArea1 = {};
+
+  area1CombatEnemyOrder.forEach((enemy) => {
+    const incomingEnemyData =
+      (incomingArea1Combat[enemy.key] && typeof incomingArea1Combat[enemy.key] === "object" && incomingArea1Combat[enemy.key]) ||
+      (incomingArea1Combat[enemy.displayName] &&
+        typeof incomingArea1Combat[enemy.displayName] === "object" &&
+        incomingArea1Combat[enemy.displayName]) ||
+      {};
+    const kills = parseKillCount(incomingEnemyData.kills);
+    normalizedArea1[enemy.key] = {
+      status: kills > 0 ? "discovered" : "undiscovered",
+      kills,
+    };
+  });
+
+  return normalizedArea1;
+}
+
+function buildArea1EnemyKillsFromCombatPayload(area1CombatPayload) {
+  const killsByEnemy = {};
+  area1CombatEnemyOrder.forEach((enemy) => {
+    const killsFromKey = area1CombatPayload?.[enemy.key]?.kills;
+    const killsFromLegacyDisplayName = area1CombatPayload?.[enemy.displayName]?.kills;
+    killsByEnemy[enemy.key] = parseKillCount(killsFromKey ?? killsFromLegacyDisplayName);
+  });
+  return killsByEnemy;
+}
+
+function buildArea1EnemyStatusFromCombatPayload(area1CombatPayload) {
+  const statusByEnemy = {};
+  area1CombatEnemyOrder.forEach((enemy) => {
+    const kills = parseKillCount(area1CombatPayload?.[enemy.key]?.kills ?? area1CombatPayload?.[enemy.displayName]?.kills);
+    statusByEnemy[enemy.key] = kills > 0 ? "discovered" : "undiscovered";
+  });
+
+  return statusByEnemy;
+}
+
+function getArea1TotalKillsFromEnemyKills(area1EnemyKills) {
+  return area1EncounterEnemyOrder.reduce((total, enemy) => total + parseKillCount(area1EnemyKills?.[enemy.key]), 0);
 }
 
 function xpForLevel(level) {
@@ -159,9 +232,14 @@ function normalizeGameDetailsPayload(rawGameDetails) {
   const allocatablePoints = Math.max(0, (normalizedStats.Level - 1) * statPointsPerLevel);
   normalizedStats["stat points available"] = Math.max(0, allocatablePoints - spentPoints);
 
+  const incomingArea1Combat = incoming?.combat?.[area1CombatDbKey] ?? incoming?.combat?.area1;
+
   const normalized = {
     day: Math.max(1, Math.round(Number(incoming.day ?? defaults.day) || defaults.day)),
     stats: normalizedStats,
+    combat: {
+      [area1CombatDbKey]: normalizeArea1CombatPayload(incomingArea1Combat),
+    },
   };
 
   return {
@@ -189,6 +267,14 @@ const state = {
   clockAnchorRealMs: Date.now(),
   lastClockDay: 1,
   isPersistingDay: false,
+  combat: {
+    selectedArea: null,
+    area1Kills: 0,
+    area1EnemyKills: Object.fromEntries(area1CombatEnemyOrder.map((enemy) => [enemy.key, 0])),
+    area1EnemyStatus: Object.fromEntries(area1CombatEnemyOrder.map((enemy) => [enemy.key, "undiscovered"])),
+    area1SelectedEnemy: null,
+    area1BossExpanded: false,
+  },
 };
 
 const ui = {
@@ -198,6 +284,7 @@ const ui = {
   worldClock: document.getElementById("worldClock"),
   clockPhase: document.getElementById("clockPhase"),
   clockTime: document.getElementById("clockTime"),
+  contentFrame: document.querySelector(".content-frame"),
   text: document.getElementById("mainText"),
   log: document.getElementById("log"),
   ascii: document.getElementById("asciiAnim"),
@@ -208,6 +295,19 @@ let statsUnsubscribe = null;
 let clockTicker = null;
 
 function getGameDetailsPayloadFromState() {
+  const area1CombatPayload = Object.fromEntries(
+    area1CombatEnemyOrder.map((enemy) => {
+      const kills = parseKillCount(state.combat.area1EnemyKills[enemy.key]);
+      return [
+        enemy.key,
+        {
+          status: kills > 0 ? "discovered" : "undiscovered",
+          kills,
+        },
+      ];
+    })
+  );
+
   return {
     day: state.day,
     stats: {
@@ -220,6 +320,9 @@ function getGameDetailsPayloadFromState() {
       int: state.coreStats.intelligence,
       end: state.coreStats.endurance,
       per: state.coreStats.perception,
+    },
+    combat: {
+      [area1CombatDbKey]: area1CombatPayload,
     },
   };
 }
@@ -410,6 +513,413 @@ function renderVillage() {
   ui.text.innerHTML = "Village systems online.";
 }
 
+const combatArea1 = {
+  id: "area1",
+  title: "AREA 1 // THE WRECKAGE",
+  setting: "Facility ruins, collapsed suburbs, cracked roads, rusted vehicles",
+  recommendedLevel: "1 - 20",
+  bossUnlock: "Per-enemy kill requirements",
+  bossUnlockRequirements: [
+    { key: "sodierAnt", label: "Sodier Ant", requiredKills: 50 },
+    { key: "bombardierBeetle", label: "Bombardier Beetle", requiredKills: 35 },
+    { key: "rubbleScarab", label: "Rubble Scarab", requiredKills: 25 },
+    { key: "jumpingSpider", label: "Jumping Spider", requiredKills: 15 },
+    { key: "IroncrustBeetle", label: "Ironcrust Beetle", requiredKills: 10 },
+  ],
+  boss: "Goliath Beetle Alpha",
+  summary:
+    "The remains of the research district. The first place the player sets foot outside the facility. Familiar enough to be unsettling. The insects here are aggressive but disorganised — they have not yet learned to coordinate.",
+  enemies: [
+    {
+      code: "E1.1",
+      name: "Soldier Ant",
+      role: "Standard",
+      hp: 120,
+      atk: 18,
+      def: 8,
+      agi: 12,
+      detail:
+        "A basic mutant ant. Fast, aggressive, attacks in coordinated pairs. The most common spawn in the Wreckage. Low individual threat — dangerous in groups.",
+      special: "None",
+      drops: "Biomass Fragment [Common], Scrap Metal [Common], Chitin Shard [Uncommon]",
+    },
+    {
+      code: "E1.2",
+      name: "Bombardier Beetle",
+      role: "Ranged",
+      hp: 95,
+      atk: 22,
+      def: 6,
+      agi: 9,
+      detail: "Hangs back and spits acid at range. Slower but hits harder than the Soldier Ant.",
+      special: "Each attack applies CORRODE (reduces player DEF by 2 per stack for 3 turns, up to 3 stacks).",
+      drops: "Acid Gland [Common], Biomass Fragment [Common], Corrosive Residue [Uncommon], Beetle Carapace Chip [Rare]",
+    },
+    {
+      code: "E1.3",
+      name: "Rubble Scarab",
+      role: "Tank",
+      hp: 280,
+      atk: 14,
+      def: 22,
+      agi: 5,
+      detail: "Slow, heavily armoured, difficult to kill quickly. Low damage but absorbs punishment. A war of attrition.",
+      special: "None",
+      drops: "Hardened Shell Fragment [Common], Scrap Metal [Common], Dense Chitin Plate [Uncommon], Reinforced Exo-Shard [Rare]",
+    },
+    {
+      code: "E1.4",
+      name: "Jumping Spider",
+      role: "Fast",
+      hp: 80,
+      atk: 28,
+      def: 5,
+      agi: 22,
+      detail: "Extremely fast. Acts first in almost every combat. Glass cannon — high damage, low health.",
+      special: "35% chance to act twice in the same turn (double strike). Each hit applies independently.",
+      drops: "Spider Silk Thread [Common], Biomass Fragment [Common], Venom Trace [Uncommon], Arachnid Fang [Rare]",
+    },
+    {
+      code: "E1.5",
+      name: "Ironcrust Beetle",
+      role: "Rare Variant",
+      hp: 350,
+      atk: 32,
+      def: 28,
+      agi: 8,
+      detail: "A larger, stronger variant of the Rubble Scarab. Significantly higher stats across the board. Worth hunting for its loot table.",
+      special: "Spawn chance ~1 in 8 encounters. When HP drops below 50%, ATK increases by 30% for the remainder of combat.",
+      drops:
+        "Dense Chitin Plate [1/2], Reinforced Exo-Shard [1/5], Ironcrust Fragment [1/60], Fused Shell Core [1/100], Carapace Shard [1/500]",
+    },
+  ],
+  bossDetails: {
+    hp: 4500,
+    atk: 65,
+    def: 45,
+    agi: 7,
+    phases: 2,
+    description:
+      "The same creature that destroyed the facility in the prologue. Van-sized. Matte-black plating. Mandibles longer than the player is tall.",
+    drops: [
+      { item: "Clue Fragment", chance: "Guaranteed" },
+      { item: "Carapace Shard", chance: "Rare" },
+    ],
+  },
+};
+
+function parseDropEntries(dropText) {
+  return dropText
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const bracketStart = entry.lastIndexOf("[");
+      const itemName = bracketStart > 0 ? entry.slice(0, bracketStart).trim() : entry;
+      const rate = bracketStart > 0 ? entry.slice(bracketStart + 1, -1).trim() : "Unknown";
+
+      return {
+        itemName,
+        rate,
+      };
+    });
+}
+
+function renderKnownValue(isKnown, knownText, unknownClass = "") {
+  if (isKnown) {
+    return knownText;
+  }
+
+  if (unknownClass) {
+    return `<span class="${unknownClass}">???</span>`;
+  }
+
+  return "???";
+}
+
+function resetContentLayout() {
+  ui.contentFrame?.classList.remove("combat-layout");
+  ui.ascii?.classList.remove("combat-sidebar");
+  ui.text?.classList.remove("combat-main");
+}
+
+function renderCombatAreaSelect() {
+  ui.ascii.innerHTML = `
+    <div class="combat-sidebar-grid">
+      <section class="combat-card combat-intel-preview">
+        <h3>Combat Feature</h3>
+        <p>Turn-based encounters where each action matters.</p>
+        <p>Build stats, defeat enemies, and progress through escalating combat zones.</p>
+      </section>
+    </div>
+  `;
+
+  ui.text.innerHTML = `
+    <div class="combat-detail-stack">
+      <section class="combat-detail-block">
+        <h3>Combat</h3>
+        <p>Beyond the safety of the village, every encounter is a calculated risk. Combat is turn-based and unforgiving — each decision, stat investment, and timing choice can decide whether you survive the next wave.</p>
+        <p>Defeat hostile creatures to earn EXP, salvage resources, and growth materials. With every victory, your build sharpens, your power rises, and you push one step deeper into the ruins.</p>
+      </section>
+
+      <section class="combat-detail-block">
+        <div class="combat-area-box">
+          <button class="action-btn" data-revamp-area="area1">AREA 1 // THE WRECKAGE <span class="combat-area-level-tag">Reccomended level: lvl 1-20</span></button>
+        </div>
+      </section>
+    </div>
+  `;
+
+  ui.text.querySelector("[data-revamp-area='area1']")?.addEventListener("click", () => {
+    state.combat.selectedArea = "area1";
+    render();
+  });
+}
+
+function renderCombatArea1Details() {
+  const area = combatArea1;
+  const villageLevelRequired = 10;
+  const isVillageConditionMet = state.villageLevel >= villageLevelRequired;
+  const villageConditionRow = `<li class="combat-unlock-item ${isVillageConditionMet ? "complete" : ""}"><span>Village Level</span><strong>${state.villageLevel}/${villageLevelRequired}</strong></li>`;
+
+  const completedEnemyUnlockRequirements = area.bossUnlockRequirements.filter(
+    (condition) => parseKillCount(state.combat.area1EnemyKills[condition.key]) >= condition.requiredKills
+  ).length;
+
+  const unlockRequirementRows = area.bossUnlockRequirements
+    .map((condition) => {
+      const currentKills = parseKillCount(state.combat.area1EnemyKills[condition.key]);
+      const isComplete = currentKills >= condition.requiredKills;
+      const isDiscovered = state.combat.area1EnemyStatus[condition.key] === "discovered";
+      const displayLabel = renderKnownValue(isDiscovered, condition.label);
+      return `<li class="combat-unlock-item ${isComplete ? "complete" : ""}"><span>${displayLabel}</span><strong>${currentKills}/${condition.requiredKills}</strong></li>`;
+    })
+    .join("");
+
+  const completedUnlockRequirements = completedEnemyUnlockRequirements + (isVillageConditionMet ? 1 : 0);
+  const totalUnlockRequirements = area.bossUnlockRequirements.length + 1;
+  const isBossUnlocked = completedUnlockRequirements >= totalUnlockRequirements;
+  const isBossDiscovered = state.combat.area1EnemyStatus.goliathAlphaBeetle === "discovered";
+
+  const enemyBoxes = area.enemies
+    .map((enemy, index) => {
+      const enemyCombatKey = area1EnemyNameToCombatKey[enemy.name];
+      const isDiscovered = enemyCombatKey ? state.combat.area1EnemyStatus[enemyCombatKey] === "discovered" : false;
+      const label = renderKnownValue(isDiscovered, enemy.name);
+      const isExpanded = index === state.combat.area1SelectedEnemy;
+
+      const lootRows = enemy.drops
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+        .map((entry) => {
+          const bracketStart = entry.lastIndexOf("[");
+          const itemName = bracketStart > 0 ? entry.slice(0, bracketStart).trim() : entry;
+          const rate = bracketStart > 0 ? entry.slice(bracketStart + 1, -1).trim() : "Unknown";
+          const displayName = renderKnownValue(isDiscovered, itemName);
+          const displayRate = renderKnownValue(isDiscovered, rate);
+
+          return `<tr><td>${displayName}</td><td>${displayRate}</td></tr>`;
+        })
+        .join("");
+
+      const expandedContent = isExpanded
+        ? `
+          <div class="combat-enemy-expand">
+            <p><strong>Name:</strong> ${renderKnownValue(isDiscovered, enemy.name)}</p>
+            <p><strong>Description:</strong> ${renderKnownValue(isDiscovered, enemy.detail)}</p>
+            <p class="combat-loot-title">Drop Table</p>
+            <table class="combat-loot-table">
+              <thead>
+                <tr><th>Name</th><th>Drop Chance</th></tr>
+              </thead>
+              <tbody>${lootRows}</tbody>
+            </table>
+          </div>
+        `
+        : "";
+
+      return `
+        <div class="combat-enemy-card ${isExpanded ? "active" : ""}">
+          <button class="combat-enemy-entry ${isExpanded ? "active" : ""}" data-area1-enemy-index="${index}">${label}</button>
+          ${expandedContent}
+        </div>
+      `;
+    })
+    .join("");
+
+  const bossIndexRows = area.bossDetails.drops
+    .map((drop) => {
+      const itemName = renderKnownValue(isBossDiscovered, drop.item, "unknown-mark");
+      const itemChance = renderKnownValue(isBossDiscovered, drop.chance, "unknown-mark");
+      return `<tr><td>${itemName}</td><td>${itemChance}</td></tr>`;
+    })
+    .join("");
+
+  const isBossIndexExpanded = state.combat.area1BossExpanded;
+  const bossIndexLabel = renderKnownValue(isBossDiscovered, area.boss, "unknown-mark");
+  const bossIndexDescription = renderKnownValue(isBossDiscovered, area.bossDetails.description, "unknown-mark");
+  const bossExpandedContent = isBossIndexExpanded
+    ? `
+      <div class="combat-enemy-expand combat-enemy-expand-boss">
+        <p><strong>Name:</strong> ${bossIndexLabel}</p>
+        <p><strong>Description:</strong> ${bossIndexDescription}</p>
+        <p class="combat-loot-title">Drop Table</p>
+        <table class="combat-loot-table">
+          <thead>
+            <tr><th>Name</th><th>Drop Chance</th></tr>
+          </thead>
+          <tbody>${bossIndexRows}</tbody>
+        </table>
+      </div>
+    `
+    : "";
+  const bossIndexBox = `
+    <div class="combat-enemy-card combat-enemy-card-boss ${isBossIndexExpanded ? "active" : ""}">
+      <button class="combat-enemy-entry combat-enemy-entry-boss ${isBossIndexExpanded ? "active" : ""}" data-area1-boss-toggle="true">BOSS</button>
+      ${bossExpandedContent}
+    </div>
+  `;
+
+  ui.ascii.innerHTML = `
+    <div class="combat-sidebar-grid">
+      <section class="combat-card combat-map-card">
+        <h3 class="combat-area-title">${area.title} <span class="combat-area-level-tag">Reccomended level: lvl ${area.recommendedLevel}</span></h3>
+        <p><strong>Setting:</strong> ${area.setting}</p>
+        <p><strong>Recommended Level:</strong> ${area.recommendedLevel}</p>
+        <p><strong>Area Kills:</strong> ${state.combat.area1Kills}</p>
+        <p><strong>Boss Unlock Progress:</strong> ${completedUnlockRequirements}/${totalUnlockRequirements} conditions met</p>
+      </section>
+      <section class="combat-card combat-intel-preview">
+        <h3>Area Brief</h3>
+        <p>${area.summary}</p>
+      </section>
+    </div>
+  `;
+
+  ui.text.innerHTML = `
+    <div class="combat-detail-stack">
+      <section class="combat-detail-block">
+        <div class="combat-area-header-actions">
+          <button class="action-btn" data-combat-back-areas="true">← Back to Areas</button>
+          <button class="action-btn" data-combat-proceed="area1">Proceed to Area</button>
+        </div>
+      </section>
+
+      <section class="combat-detail-block combat-area-brief-box">
+        <h3 class="combat-area-title">${area.title} <span class="combat-area-level-tag">Reccomended level: lvl ${area.recommendedLevel}</span></h3>
+        <div class="combat-area-description-box">
+          <p class="combat-area-description">${area.summary}</p>
+        </div>
+        <div class="combat-boss-conditions">
+          <p class="combat-loot-title">Boss Unlock Conditions</p>
+          <ul class="combat-unlock-list">${villageConditionRow}${unlockRequirementRows}</ul>
+          <div class="combat-boss-preview">
+            <p class="combat-loot-title">Boss</p>
+            <button
+              class="combat-boss-box combat-boss-box-btn ${isBossUnlocked ? "unlocked" : "locked"}"
+              data-boss-fight="area1"
+              aria-label="${isBossUnlocked ? "Boss unlocked" : "Boss locked"}"
+            >${isBossUnlocked ? "Fight" : '<span class="combat-boss-lock-icon" aria-hidden="true"></span>'}</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="combat-detail-block">
+        <div class="combat-discovery-grid">
+          <div class="combat-enemy-list">
+            <p class="combat-index-title">Combat index</p>
+            ${enemyBoxes}
+            ${bossIndexBox}
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+
+  ui.text.querySelector("[data-combat-back-areas='true']")?.addEventListener("click", () => {
+    state.combat.selectedArea = null;
+    render();
+  });
+
+  ui.text.querySelector("[data-combat-proceed='area1']")?.addEventListener("click", async () => {
+    const encounterEnemy = area.enemies[Math.floor(Math.random() * area.enemies.length)];
+    const encounterEnemyIndex = area.enemies.findIndex((enemy) => enemy.name === encounterEnemy.name);
+    const encounterEnemyKey = area1EnemyNameToCombatKey[encounterEnemy.name];
+    const previousKills = encounterEnemyKey ? parseKillCount(state.combat.area1EnemyKills[encounterEnemyKey]) : 0;
+    if (encounterEnemyKey) {
+      state.combat.area1EnemyKills[encounterEnemyKey] = previousKills + 1;
+    }
+    state.combat.area1Kills = getArea1TotalKillsFromEnemyKills(state.combat.area1EnemyKills);
+    state.combat.area1SelectedEnemy = encounterEnemyIndex >= 0 ? encounterEnemyIndex : state.combat.area1SelectedEnemy;
+    const isFirstEnemyDiscovery = previousKills === 0;
+
+    if (isFirstEnemyDiscovery) {
+      addLog(`${encounterEnemy.name} is added to combat log!`);
+
+      parseDropEntries(encounterEnemy.drops).forEach((drop) => {
+        addLog(`${drop.itemName} is added to combat log!`);
+      });
+    }
+
+    try {
+      await persistStats();
+    } catch (error) {
+      console.error("Failed to persist combat progression:", error);
+      addLog("Sync warning: combat progression could not be saved.");
+    }
+
+    render();
+  });
+
+  ui.text.querySelector("[data-boss-fight='area1']")?.addEventListener("click", () => {
+    if (!isBossUnlocked) {
+      addLog("boss unlock conditions have not been met.");
+      renderLog();
+      return;
+    }
+
+    addLog("Boss fight entry selected. Encounter implementation is next.");
+    renderLog();
+  });
+
+  ui.text.querySelectorAll("[data-area1-enemy-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextIndex = Number(button.dataset.area1EnemyIndex);
+      if (Number.isNaN(nextIndex)) {
+        return;
+      }
+
+      state.combat.area1SelectedEnemy = state.combat.area1SelectedEnemy === nextIndex ? null : nextIndex;
+      state.combat.area1BossExpanded = false;
+      render();
+    });
+  });
+
+  ui.text.querySelector("[data-area1-boss-toggle='true']")?.addEventListener("click", () => {
+    state.combat.area1BossExpanded = !state.combat.area1BossExpanded;
+    if (state.combat.area1BossExpanded) {
+      state.combat.area1SelectedEnemy = null;
+    }
+    render();
+  });
+}
+
+function renderCombatPage() {
+  ui.contentFrame?.classList.add("combat-layout");
+  ui.ascii?.classList.add("combat-sidebar");
+  ui.text?.classList.add("combat-main");
+
+  if (state.combat.selectedArea === "area1") {
+    ui.title.textContent = "Combat // Area 1";
+    renderCombatArea1Details();
+    return;
+  }
+
+  ui.title.textContent = "Combat";
+  renderCombatAreaSelect();
+}
+
 async function assignStatPoint(statKey) {
   if (state.statPoints <= 0) {
     addLog("No available stat points.");
@@ -497,12 +1007,15 @@ function renderSettings() {
 function render() {
   ui.title.textContent = state.page;
   renderWorldClock();
+  resetContentLayout();
 
   renderStats();
   renderActivities();
 
   if (state.page === "Village") {
     renderVillage();
+  } else if (state.page === "Combat") {
+    renderCombatPage();
   } else if (state.page === "Stats") {
     renderStatsPage();
   } else {
@@ -561,6 +1074,9 @@ function subscribeToUserStats(uid) {
         endurance: payload.stats.end,
         perception: payload.stats.per,
       };
+      state.combat.area1EnemyKills = buildArea1EnemyKillsFromCombatPayload(payload.combat?.[area1CombatDbKey]);
+      state.combat.area1EnemyStatus = buildArea1EnemyStatusFromCombatPayload(payload.combat?.[area1CombatDbKey]);
+      state.combat.area1Kills = getArea1TotalKillsFromEnemyKills(state.combat.area1EnemyKills);
       recalculateDerivedState();
       setClockAnchor(state.day);
 
